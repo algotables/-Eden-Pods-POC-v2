@@ -8,7 +8,6 @@ import {
   getCurrentStage, getNextStage,
   QUANTITY_ICONS, QUANTITY_LABELS, QUANTITY_GRAMS,
 } from "@/lib/store";
-import type { Harvest } from "@/lib/store";
 import type { OnChainHarvest } from "@/lib/algorand";
 import { buildHarvestTxn, signAndSendTxns } from "@/lib/algorand";
 import type { UnifiedThrow } from "@/contexts/AppContext";
@@ -33,9 +32,7 @@ export default function ThrowDetail({
   const {
     observations,
     onChainHarvests,
-    localHarvests,
     addObservation,
-    addLocalHarvest,
     refreshThrows,
     addOptimisticHarvest,
     confirmHarvest,
@@ -50,7 +47,6 @@ export default function ThrowDetail({
   const [hNotes,    setHNotes]    = useState("");
   const [savingObs, setSavingObs] = useState<string | null>(null);
   const [savingH,   setSavingH]   = useState(false);
-  const [onChain,   setOnChain]   = useState(true);
 
   const pt    = POD_TYPES.find((p) => p.id === throwData.podTypeId);
   const model = GROWTH_MODELS.find((m) => m.id === throwData.growthModelId);
@@ -85,14 +81,9 @@ export default function ThrowDetail({
     );
   }
 
-  // Harvest lists — context owns both confirmed and optimistic rows
-  const myOnChain = onChainHarvests.filter(
+  // All harvests for this throw — context owns both confirmed and pending rows.
+  const myHarvests = onChainHarvests.filter(
     (h) => h.throwAsaId === throwData.asaId
-  );
-  const myLocal = localHarvests.filter(
-    (h) =>
-      h.throwId === throwData.localId ||
-      h.throwId === String(throwData.asaId)
   );
 
   const myObs = observations.filter(
@@ -106,12 +97,11 @@ export default function ThrowDetail({
     (r) => r.plants.some((p) => pt.plants.includes(p))
   );
 
-  const totalG = [...myOnChain, ...myLocal].reduce(
+  const totalG = myHarvests.reduce(
     (s, h) => s + QUANTITY_GRAMS[h.quantityClass],
     0
   );
 
-  // Handlers
   const logObs = (stageId: string) => {
     setSavingObs(stageId);
     addObservation({
@@ -124,61 +114,51 @@ export default function ThrowDetail({
   };
 
   const logHarvest = async () => {
-    if (!hPlant || !address) return;
+    if (!hPlant || !address || throwData.asaId === 0) return;
     setSavingH(true);
 
-    const now = new Date().toISOString();
+    const now             = new Date().toISOString();
+    const placeholderTxId = `pending-${uuid()}`;
+    const placeholder: OnChainHarvest = {
+      txId:          placeholderTxId,
+      throwAsaId:    throwData.asaId,
+      plantId:       hPlant,
+      quantityClass: hQty,
+      harvestedAt:   now,
+      notes:         hNotes,
+      confirmedAt:   now,
+    };
+
+    // Push into context (written to localStorage immediately).
+    addOptimisticHarvest(placeholder);
+
+    // Close modal straight away — row is already visible.
+    setModal(false);
+    setHPlant("");
+    setHNotes("");
 
     try {
-      if (onChain && throwData.asaId > 0) {
-        const placeholderTxId = `pending-${uuid()}`;
-        const placeholder: OnChainHarvest = {
-          txId:          placeholderTxId,
-          throwAsaId:    throwData.asaId,
-          plantId:       hPlant,
-          quantityClass: hQty,
-          harvestedAt:   now,
-          notes:         hNotes,
-          confirmedAt:   now,
-        };
-        addOptimisticHarvest(placeholder);
+      const txn = await buildHarvestTxn(address, {
+        throwAsaId:    throwData.asaId,
+        plantId:       hPlant,
+        quantityClass: hQty,
+        harvestedAt:   now,
+        notes:         hNotes,
+      });
+      const { txIds } = await signAndSendTxns([txn], address);
 
-        setModal(false);
-        setHPlant("");
-        setHNotes("");
+      // Replace placeholder with the real txId.
+      confirmHarvest(placeholderTxId, txIds[0] ?? placeholderTxId);
 
-        try {
-          const txn = await buildHarvestTxn(address, {
-            throwAsaId:    throwData.asaId,
-            plantId:       hPlant,
-            quantityClass: hQty,
-            harvestedAt:   now,
-            notes:         hNotes,
-          });
-          const { txIds } = await signAndSendTxns([txn], address);
+      toast.success("Harvest recorded on-chain!");
 
-          confirmHarvest(placeholderTxId, txIds[0] ?? placeholderTxId);
-
-          toast.success("Harvest recorded on-chain!");
-          setTimeout(() => refreshThrows(), 4_000);
-        } catch (err) {
-          removeHarvest(placeholderTxId);
-          setModal(true);
-          throw err;
-        }
-      } else {
-        addLocalHarvest({
-          throwId:       throwData.asaId > 0 ? String(throwData.asaId) : throwData.localId,
-          plantId:       hPlant,
-          quantityClass: hQty,
-          notes:         hNotes,
-        });
-        toast.success("Harvest saved locally!");
-        setModal(false);
-        setHPlant("");
-        setHNotes("");
-      }
+      // Background refresh — the optimistic row stays visible until the
+      // indexer catches up and the merge deduplicates it.
+      setTimeout(() => refreshThrows(), 4_000);
     } catch (err) {
+      // Roll back.
+      removeHarvest(placeholderTxId);
+      setModal(true);
       const msg = err instanceof Error ? err.message : "";
       toast.error(
         msg.includes("cancel") || msg.includes("reject")
@@ -425,88 +405,59 @@ export default function ThrowDetail({
             </div>
           </div>
 
-          {throwData.asaId > 0 && (
-            <div className="flex items-center gap-3 p-3 bg-purple-50 border border-purple-200 rounded-2xl">
-              <span className="text-sm font-medium text-purple-800 flex-1">
-                Record harvest on-chain
-              </span>
-              <button
-                onClick={() => setOnChain((v) => !v)}
-                className={cn(
-                  "w-12 h-6 rounded-full transition-colors relative flex-shrink-0",
-                  onChain ? "bg-purple-600" : "bg-gray-300"
-                )}
-              >
-                <span
-                  className={cn(
-                    "absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform",
-                    onChain ? "translate-x-6" : "translate-x-0.5"
-                  )}
-                />
-              </button>
+          {throwData.asaId > 0 ? (
+            <button
+              onClick={() => {
+                setHPlant(pt.plants[0] ?? "");
+                setModal(true);
+              }}
+              className="btn-primary w-full"
+            >
+              Log a Harvest
+            </button>
+          ) : (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-center">
+              <p className="text-sm text-amber-700">
+                Harvest logging available once the throw NFT is confirmed on-chain.
+              </p>
             </div>
           )}
 
-          <button
-            onClick={() => {
-              setHPlant(pt.plants[0] ?? "");
-              setModal(true);
-            }}
-            className="btn-primary w-full"
-          >
-            Log a Harvest{" "}
-            {onChain && throwData.asaId > 0 ? "(on-chain)" : "(local)"}
-          </button>
-
-          {/* On-chain harvest rows */}
-          {myOnChain.map((h) => (
-            <div
-              key={h.txId}
-              className={cn(
-                "flex items-center gap-3 p-3 bg-white rounded-2xl border",
-                h.txId.startsWith("pending-")
-                  ? "border-purple-200 opacity-70"
-                  : "border-purple-100"
-              )}
-            >
-              <span className="text-2xl">{QUANTITY_ICONS[h.quantityClass]}</span>
-              <div className="flex-1">
-                <p className="font-medium text-sm text-gray-800 capitalize">
-                  {h.plantId.replace(/-/g, " ")}
-                </p>
-                <p className="text-xs text-gray-500">
-                  {QUANTITY_LABELS[h.quantityClass]} ·{" "}
-                  {h.txId.startsWith("pending-")
-                    ? "confirming…"
-                    : timeAgo(h.harvestedAt)}
+          {/* Harvest rows */}
+          {myHarvests.length === 0 ? (
+            <div className="text-center py-8 text-gray-400">
+              <div className="text-4xl mb-2">🧺</div>
+              <p className="text-sm">No harvests logged yet</p>
+            </div>
+          ) : (
+            myHarvests.map((h) => (
+              <div
+                key={h.txId}
+                className={cn(
+                  "flex items-center gap-3 p-3 bg-white rounded-2xl border",
+                  h.txId.startsWith("pending-")
+                    ? "border-purple-200 opacity-70"
+                    : "border-purple-100"
+                )}
+              >
+                <span className="text-2xl">{QUANTITY_ICONS[h.quantityClass]}</span>
+                <div className="flex-1">
+                  <p className="font-medium text-sm text-gray-800 capitalize">
+                    {h.plantId.replace(/-/g, " ")}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {QUANTITY_LABELS[h.quantityClass]} ·{" "}
+                    {h.txId.startsWith("pending-")
+                      ? "confirming…"
+                      : timeAgo(h.harvestedAt)}
+                  </p>
+                </div>
+                <p className="text-xs font-medium text-purple-700">
+                  ~{QUANTITY_GRAMS[h.quantityClass]}g
                 </p>
               </div>
-              <p className="text-xs font-medium text-purple-700">
-                ~{QUANTITY_GRAMS[h.quantityClass]}g
-              </p>
-            </div>
-          ))}
-
-          {/* Local harvest rows */}
-          {myLocal.map((h) => (
-            <div
-              key={h.id}
-              className="flex items-center gap-3 p-3 bg-white rounded-2xl border border-gray-100"
-            >
-              <span className="text-2xl">{QUANTITY_ICONS[h.quantityClass]}</span>
-              <div className="flex-1">
-                <p className="font-medium text-sm text-gray-800 capitalize">
-                  {h.plantId.replace(/-/g, " ")}
-                </p>
-                <p className="text-xs text-gray-500">
-                  {QUANTITY_LABELS[h.quantityClass]} · {timeAgo(h.harvestedAt)}
-                </p>
-              </div>
-              <p className="text-xs font-medium text-eden-700">
-                ~{QUANTITY_GRAMS[h.quantityClass]}g
-              </p>
-            </div>
-          ))}
+            ))
+          )}
 
           {totalG > 0 && (
             <div className="card-sm bg-eden-50 border-eden-200 text-center">
@@ -644,11 +595,7 @@ export default function ThrowDetail({
                 disabled={savingH || !hPlant}
                 className="btn-primary w-full disabled:opacity-50"
               >
-                {savingH
-                  ? "Saving..."
-                  : onChain && throwData.asaId > 0
-                  ? "Record On-Chain"
-                  : "Save Locally"}
+                {savingH ? "Saving..." : "Record On-Chain"}
               </button>
             </div>
           </div>
