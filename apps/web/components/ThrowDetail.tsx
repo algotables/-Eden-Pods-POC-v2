@@ -81,9 +81,10 @@ export default function ThrowDetail({
     );
   }
 
-  // All harvests for this throw — context owns both confirmed and pending rows.
+  // Coerce both sides to Number — algosdk v3 may return BigInt for asset
+  // indices, which would cause === to silently return false against a number.
   const myHarvests = onChainHarvests.filter(
-    (h) => h.throwAsaId === throwData.asaId
+    (h) => Number(h.throwAsaId) === Number(throwData.asaId)
   );
 
   const myObs = observations.filter(
@@ -121,7 +122,7 @@ export default function ThrowDetail({
     const placeholderTxId = `pending-${uuid()}`;
     const placeholder: OnChainHarvest = {
       txId:          placeholderTxId,
-      throwAsaId:    throwData.asaId,
+      throwAsaId:    Number(throwData.asaId),
       plantId:       hPlant,
       quantityClass: hQty,
       harvestedAt:   now,
@@ -129,34 +130,24 @@ export default function ThrowDetail({
       confirmedAt:   now,
     };
 
-    // Push into context (written to localStorage immediately).
     addOptimisticHarvest(placeholder);
-
-    // Close modal straight away — row is already visible.
     setModal(false);
     setHPlant("");
     setHNotes("");
 
     try {
       const txn = await buildHarvestTxn(address, {
-        throwAsaId:    throwData.asaId,
+        throwAsaId:    Number(throwData.asaId),
         plantId:       hPlant,
         quantityClass: hQty,
         harvestedAt:   now,
         notes:         hNotes,
       });
       const { txIds } = await signAndSendTxns([txn], address);
-
-      // Replace placeholder with the real txId.
       confirmHarvest(placeholderTxId, txIds[0] ?? placeholderTxId);
-
       toast.success("Harvest recorded on-chain!");
-
-      // Background refresh — the optimistic row stays visible until the
-      // indexer catches up and the merge deduplicates it.
       setTimeout(() => refreshThrows(), 4_000);
     } catch (err) {
-      // Roll back.
       removeHarvest(placeholderTxId);
       setModal(true);
       const msg = err instanceof Error ? err.message : "";
@@ -423,7 +414,6 @@ export default function ThrowDetail({
             </div>
           )}
 
-          {/* Harvest rows */}
           {myHarvests.length === 0 ? (
             <div className="text-center py-8 text-gray-400">
               <div className="text-4xl mb-2">🧺</div>
