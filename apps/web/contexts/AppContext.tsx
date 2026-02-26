@@ -12,11 +12,9 @@ import React, {
 import {
   LocalState,
   Observation,
-  Harvest,
   Notification,
   loadLocal,
   addObservation       as storeAddObs,
-  addLocalHarvest      as storeAddHarvest,
   markNotificationRead as storeMark,
   markAllRead          as storeMarkAll,
   getDueNotifications,
@@ -49,8 +47,6 @@ interface AppCtxType {
   addOptimisticHarvest: (h: OnChainHarvest) => void;
   confirmHarvest:       (placeholderTxId: string, realTxId: string) => void;
   removeHarvest:        (txId: string) => void;
-  localHarvests:        Harvest[];
-  addLocalHarvest:      (data: Omit<Harvest, "id" | "harvestedAt">) => void;
   notifications:        Notification[];
   unreadCount:          number;
   markRead:             (id: string) => void;
@@ -79,11 +75,7 @@ type AppAction =
   | { type: "SET_LOCAL";       payload: LocalState       }
   | { type: "RESET" };
 
-const EMPTY_LOCAL: LocalState = {
-  observations:  [],
-  harvests:      [],
-  notifications: [],
-};
+const EMPTY_LOCAL: LocalState = { observations: [], notifications: [] };
 
 function initialState(): AppState {
   return {
@@ -96,27 +88,26 @@ function initialState(): AppState {
   };
 }
 
+/**
+ * Merge two harvest lists by txId.
+ * - Existing rows (cache + optimistic) are the base.
+ * - Incoming indexer rows overwrite the same txId.
+ * - Pending placeholder rows are never removed by an incoming fetch
+ *   because the indexer will never return a "pending-*" txId.
+ * - Result is sorted: pending first, then newest harvestedAt first.
+ */
 function mergeHarvests(
   existing: OnChainHarvest[],
   incoming: OnChainHarvest[]
 ): OnChainHarvest[] {
-  // Build a map of everything we already know about, keyed by txId.
-  const merged = new Map<string, OnChainHarvest>();
-
-  // Seed with existing rows first (includes optimistic/pending ones and
-  // previously cached confirmed ones).
-  for (const h of existing) merged.set(h.txId, h);
-
-  // Layer in fresh indexer rows. A real txId from the indexer always wins
-  // over a cached copy of the same txId.
-  for (const h of incoming) merged.set(h.txId, h);
-
-  // Sort: pending rows first, then by harvestedAt descending.
-  return [...merged.values()].sort((a, b) => {
-    const aPending = a.txId.startsWith("pending-");
-    const bPending = b.txId.startsWith("pending-");
-    if (aPending && !bPending) return -1;
-    if (!aPending && bPending) return  1;
+  const map = new Map<string, OnChainHarvest>();
+  for (const h of existing) map.set(h.txId, h);
+  for (const h of incoming) map.set(h.txId, h);
+  return [...map.values()].sort((a, b) => {
+    const ap = a.txId.startsWith("pending-");
+    const bp = b.txId.startsWith("pending-");
+    if (ap && !bp) return -1;
+    if (!ap && bp) return  1;
     return new Date(b.harvestedAt).getTime() - new Date(a.harvestedAt).getTime();
   });
 }
@@ -125,30 +116,16 @@ function reducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "SET_CONFIRMED":
       return { ...state, confirmedThrows: action.payload };
-
     case "SET_PENDING":
       return { ...state, pendingThrows: action.payload };
-
     case "SET_LOADING":
       return { ...state, throwsLoading: action.payload };
-
     case "SET_ERROR":
       return { ...state, throwsError: action.payload };
-
-    // Merge incoming indexer harvests with what we already have in memory.
-    // This means confirmed-but-not-yet-indexed rows are never wiped out.
     case "MERGE_HARVESTS":
-      return {
-        ...state,
-        onChainHarvests: mergeHarvests(state.onChainHarvests, action.payload),
-      };
-
+      return { ...state, onChainHarvests: mergeHarvests(state.onChainHarvests, action.payload) };
     case "ADD_HARVEST":
-      return {
-        ...state,
-        onChainHarvests: [action.payload, ...state.onChainHarvests],
-      };
-
+      return { ...state, onChainHarvests: [action.payload, ...state.onChainHarvests] };
     case "CONFIRM_HARVEST":
       return {
         ...state,
@@ -158,21 +135,15 @@ function reducer(state: AppState, action: AppAction): AppState {
             : h
         ),
       };
-
     case "REMOVE_HARVEST":
       return {
         ...state,
-        onChainHarvests: state.onChainHarvests.filter(
-          (h) => h.txId !== action.payload
-        ),
+        onChainHarvests: state.onChainHarvests.filter((h) => h.txId !== action.payload),
       };
-
     case "SET_LOCAL":
       return { ...state, local: action.payload };
-
     case "RESET":
       return initialState();
-
     default:
       return state;
   }
@@ -189,10 +160,7 @@ function loadConfirmed(address: string): UnifiedThrow[] {
   try {
     const raw = localStorage.getItem(confirmedKey(address));
     if (!raw) return [];
-    return (JSON.parse(raw) as UnifiedThrow[]).map((t) => ({
-      ...t,
-      isPending: false,
-    }));
+    return (JSON.parse(raw) as UnifiedThrow[]).map((t) => ({ ...t, isPending: false }));
   } catch { return []; }
 }
 
@@ -247,7 +215,6 @@ const AppCtx = createContext<AppCtxType | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const { address } = useWallet();
-
   const [state, dispatch] = useReducer(reducer, undefined, initialState);
 
   const mountedRef           = useRef(true);
@@ -264,9 +231,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     confirmedRef.current = state.confirmedThrows;
   }, [state.confirmedThrows]);
 
-  // Persist harvests to localStorage whenever the in-memory list changes.
+  // Persist the full harvest list (confirmed + pending) on every change.
   useEffect(() => {
-    if (!address || state.onChainHarvests.length === 0) return;
+    if (!address) return;
     saveHarvests(address, state.onChainHarvests);
   }, [address, state.onChainHarvests]);
 
@@ -306,8 +273,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
       saveConfirmed(addr, unified);
       dispatch({ type: "SET_CONFIRMED",  payload: unified  });
-      // Merge indexer results into existing state rather than replacing —
-      // confirmed-but-not-yet-indexed harvests survive this way.
+      // Always merge — never replace. Cached/optimistic rows survive an
+      // empty or partial indexer response.
       dispatch({ type: "MERGE_HARVESTS", payload: harvests });
       dispatch({ type: "SET_ERROR",      payload: null     });
 
@@ -371,8 +338,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     dispatch({ type: "SET_CONFIRMED",  payload: cached   });
     dispatch({ type: "SET_PENDING",    payload: pending  });
-    // Seed from cache immediately — MERGE_HARVESTS into empty initial state
-    // is equivalent to SET but goes through the same merge path for consistency.
     dispatch({ type: "MERGE_HARVESTS", payload: harvests });
 
     doFetch(address).catch((e) => {
@@ -425,24 +390,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [reload]
   );
 
-  const addLocalHarvest = useCallback(
-    (data: Omit<Harvest, "id" | "harvestedAt">) => {
-      storeAddHarvest(data);
-      reload();
-    },
-    [reload]
-  );
-
   const addOptimisticHarvest = useCallback((h: OnChainHarvest) => {
     dispatch({ type: "ADD_HARVEST", payload: h });
   }, []);
 
   const confirmHarvest = useCallback(
     (placeholderTxId: string, realTxId: string) => {
-      dispatch({
-        type:    "CONFIRM_HARVEST",
-        payload: { placeholderTxId, realTxId },
-      });
+      dispatch({ type: "CONFIRM_HARVEST", payload: { placeholderTxId, realTxId } });
     },
     []
   );
@@ -483,8 +437,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         addOptimisticHarvest,
         confirmHarvest,
         removeHarvest,
-        localHarvests:        state.local.harvests,
-        addLocalHarvest,
         notifications:        state.local.notifications,
         unreadCount:          due.length,
         markRead,
