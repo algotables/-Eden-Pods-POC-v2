@@ -8,11 +8,13 @@ import {
   getCurrentStage, getNextStage,
   QUANTITY_ICONS, QUANTITY_LABELS, QUANTITY_GRAMS,
 } from "@/lib/store";
+import type { Harvest, OnChainHarvest } from "@/lib/store";
 import { buildHarvestTxn, signAndSendTxns } from "@/lib/algorand";
 import type { UnifiedThrow } from "@/contexts/AppContext";
 import { cn, timeAgo, fmtDate } from "@/lib/utils";
 import ThrowNFTBadge from "./ThrowNFTBadge";
 import toast from "react-hot-toast";
+import { v4 as uuid } from "uuid";
 
 const OBS_STAGES = [
   { id: "sprout",    icon: "🌱", label: "Sprouts"   },
@@ -42,14 +44,14 @@ export default function ThrowDetail({
   const [savingH,   setSavingH]   = useState(false);
   const [onChain,   setOnChain]   = useState(true);
 
+  // Optimistic harvest lists — seeded from context, appended to locally on save
+  const [optimisticOnChain, setOptimisticOnChain] = useState<OnChainHarvest[]>([]);
+  const [optimisticLocal,   setOptimisticLocal]   = useState<Harvest[]>([]);
+
   const pt    = POD_TYPES.find((p)    => p.id === throwData.podTypeId);
   const model = GROWTH_MODELS.find((m) => m.id === throwData.growthModelId);
   const sd    = model ? getCurrentStage(throwData.throwDate, model) : null;
   const next  = model ? getNextStage(throwData.throwDate, model)    : null;
-
-  // ------------------------------------------------------------------
-  // Guard: unknown pod type or model
-  // ------------------------------------------------------------------
 
   if (!pt) {
     return (
@@ -79,10 +81,31 @@ export default function ThrowDetail({
     );
   }
 
-  // ------------------------------------------------------------------
-  // Derived data
-  // ------------------------------------------------------------------
+  // ── Derive harvest lists ────────────────────────────────────────────────────
+  // Context lists (already filtered for this throw by context/store)
+  const contextOnChain = onChainHarvests.filter(
+    (h) => h.throwAsaId === throwData.asaId
+  );
+  const contextLocal = localHarvests.filter(
+    (h) =>
+      h.throwId === throwData.localId ||
+      h.throwId === String(throwData.asaId)
+  );
 
+  // Merge: context list + optimistic additions, deduped by txId / id
+  const contextOnChainIds = new Set(contextOnChain.map((h) => h.txId));
+  const contextLocalIds   = new Set(contextLocal.map((h) => h.id));
+
+  const mergedOnChain: OnChainHarvest[] = [
+    ...optimisticOnChain.filter((h) => !contextOnChainIds.has(h.txId)),
+    ...contextOnChain,
+  ];
+  const mergedLocal: Harvest[] = [
+    ...optimisticLocal.filter((h) => !contextLocalIds.has(h.id)),
+    ...contextLocal,
+  ];
+
+  // ── Other derivations ───────────────────────────────────────────────────────
   const myObs = observations.filter(
     (o) =>
       o.throwId === throwData.localId ||
@@ -90,28 +113,16 @@ export default function ThrowDetail({
   );
   const observedIds = new Set(myObs.map((o) => o.stageId));
 
-  const myOnChain = onChainHarvests.filter(
-    (h) => h.throwAsaId === throwData.asaId
-  );
-  const myLocal = localHarvests.filter(
-    (h) =>
-      h.throwId === throwData.localId ||
-      h.throwId === String(throwData.asaId)
-  );
-
   const recipes = RECIPES.filter(
     (r) => r.plants.some((p) => pt.plants.includes(p))
   );
 
-  const totalG = [...myOnChain, ...myLocal].reduce(
+  const totalG = [...mergedOnChain, ...mergedLocal].reduce(
     (s, h) => s + QUANTITY_GRAMS[h.quantityClass],
     0
   );
 
-  // ------------------------------------------------------------------
-  // Actions
-  // ------------------------------------------------------------------
-
+  // ── Handlers ────────────────────────────────────────────────────────────────
   const logObs = (stageId: string) => {
     setSavingObs(stageId);
     addObservation({
@@ -126,30 +137,89 @@ export default function ThrowDetail({
   const logHarvest = async () => {
     if (!hPlant || !address) return;
     setSavingH(true);
+
+    const now = new Date().toISOString();
+
     try {
       if (onChain && throwData.asaId > 0) {
-        const txn = await buildHarvestTxn(address, {
+        // ── On-chain path ───────────────────────────────────────────────────
+        // Optimistically add a placeholder so the row appears instantly.
+        const placeholder: OnChainHarvest = {
+          txId:          `pending-${uuid()}`,
           throwAsaId:    throwData.asaId,
           plantId:       hPlant,
           quantityClass: hQty,
-          harvestedAt:   new Date().toISOString(),
+          harvestedAt:   now,
           notes:         hNotes,
-        });
-        await signAndSendTxns([txn], address);
-        toast.success("Harvest recorded on-chain!");
-        setTimeout(() => refreshThrows(), 3_000);
+          confirmedAt:   now,
+        };
+        setOptimisticOnChain((prev) => [placeholder, ...prev]);
+
+        // Close the modal immediately so the user sees the new row.
+        setModal(false);
+        setHPlant("");
+        setHNotes("");
+
+        try {
+          const txn = await buildHarvestTxn(address, {
+            throwAsaId:    throwData.asaId,
+            plantId:       hPlant,
+            quantityClass: hQty,
+            harvestedAt:   now,
+            notes:         hNotes,
+          });
+          const { txIds } = await signAndSendTxns([txn], address);
+
+          // Replace placeholder with real txId once confirmed.
+          setOptimisticOnChain((prev) =>
+            prev.map((h) =>
+              h.txId === placeholder.txId
+                ? { ...h, txId: txIds[0] ?? placeholder.txId }
+                : h
+            )
+          );
+
+          toast.success("Harvest recorded on-chain!");
+
+          // Background refresh so context eventually catches up; the
+          // optimistic row stays visible in the meantime.
+          setTimeout(() => refreshThrows(), 4_000);
+        } catch (err) {
+          // Roll back the optimistic row on failure.
+          setOptimisticOnChain((prev) =>
+            prev.filter((h) => h.txId !== placeholder.txId)
+          );
+          // Re-open the modal so the user can try again.
+          setModal(true);
+          throw err;
+        }
       } else {
+        // ── Local path ─────────────────────────────────────────────────────
+        // addLocalHarvest writes to localStorage + triggers context reload,
+        // but that reload is async. Add optimistically too so the row
+        // appears before the next render cycle.
+        const optimistic: Harvest = {
+          id:            uuid(),
+          throwId:       throwData.asaId > 0 ? String(throwData.asaId) : throwData.localId,
+          plantId:       hPlant,
+          quantityClass: hQty,
+          harvestedAt:   now,
+          notes:         hNotes,
+        };
+        setOptimisticLocal((prev) => [optimistic, ...prev]);
+
         addLocalHarvest({
           throwId:       throwData.asaId > 0 ? String(throwData.asaId) : throwData.localId,
           plantId:       hPlant,
           quantityClass: hQty,
           notes:         hNotes,
         });
+
         toast.success("Harvest saved locally!");
+        setModal(false);
+        setHPlant("");
+        setHNotes("");
       }
-      setModal(false);
-      setHPlant("");
-      setHNotes("");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
       toast.error(
@@ -161,10 +231,6 @@ export default function ThrowDetail({
       setSavingH(false);
     }
   };
-
-  // ------------------------------------------------------------------
-  // Render
-  // ------------------------------------------------------------------
 
   return (
     <div className="pb-6">
@@ -434,10 +500,16 @@ export default function ThrowDetail({
             {onChain && throwData.asaId > 0 ? "(on-chain)" : "(local)"}
           </button>
 
-          {myOnChain.map((h) => (
+          {/* On-chain harvest rows */}
+          {mergedOnChain.map((h) => (
             <div
               key={h.txId}
-              className="flex items-center gap-3 p-3 bg-white rounded-2xl border border-purple-100"
+              className={cn(
+                "flex items-center gap-3 p-3 bg-white rounded-2xl border",
+                h.txId.startsWith("pending-")
+                  ? "border-purple-200 opacity-70"
+                  : "border-purple-100"
+              )}
             >
               <span className="text-2xl">{QUANTITY_ICONS[h.quantityClass]}</span>
               <div className="flex-1">
@@ -445,7 +517,10 @@ export default function ThrowDetail({
                   {h.plantId.replace(/-/g, " ")}
                 </p>
                 <p className="text-xs text-gray-500">
-                  {QUANTITY_LABELS[h.quantityClass]} · {timeAgo(h.harvestedAt)}
+                  {QUANTITY_LABELS[h.quantityClass]} ·{" "}
+                  {h.txId.startsWith("pending-")
+                    ? "confirming…"
+                    : timeAgo(h.harvestedAt)}
                 </p>
               </div>
               <p className="text-xs font-medium text-purple-700">
@@ -454,7 +529,8 @@ export default function ThrowDetail({
             </div>
           ))}
 
-          {myLocal.map((h) => (
+          {/* Local harvest rows */}
+          {mergedLocal.map((h) => (
             <div
               key={h.id}
               className="flex items-center gap-3 p-3 bg-white rounded-2xl border border-gray-100"
@@ -528,9 +604,7 @@ export default function ThrowDetail({
           ) : (
             <div className="text-center py-8 text-gray-400">
               <div className="text-4xl mb-2">👩‍🍳</div>
-              <p className="text-sm">
-                Recipes will appear as plants mature
-              </p>
+              <p className="text-sm">Recipes will appear as plants mature</p>
             </div>
           )}
         </div>
@@ -542,7 +616,10 @@ export default function ThrowDetail({
           <div className="bg-white rounded-t-3xl p-6 w-full max-w-lg max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-5">
               <h3 className="text-xl font-bold text-gray-900">Log Harvest</h3>
-              <button onClick={() => setModal(false)} className="text-gray-400 text-2xl">
+              <button
+                onClick={() => setModal(false)}
+                className="text-gray-400 text-2xl"
+              >
                 ×
               </button>
             </div>
