@@ -49,13 +49,9 @@ export function explorerTxUrl(txId: string): string {
   return `${EXPLORER_BASE}/tx/${txId}`;
 }
 
-/**
- * Safely convert any value to a JSON-serialisable primitive.
- * Converts BigInt → number, leaves everything else as-is.
- */
 function sanitiseForJson(val: unknown): unknown {
   if (typeof val === "bigint") return Number(val);
-  if (Array.isArray(val))      return val.map(sanitiseForJson);
+  if (Array.isArray(val))     return val.map(sanitiseForJson);
   if (val !== null && typeof val === "object") {
     return Object.fromEntries(
       Object.entries(val as Record<string, unknown>).map(([k, v]) => [
@@ -71,10 +67,7 @@ function buildNote(
   type:  string,
   props: Record<string, unknown>
 ): Uint8Array {
-  // Sanitise props so that any BigInt values (e.g. throwAsaId coming from
-  // algosdk v3) are converted to numbers before JSON.stringify runs.
   const safeProps = sanitiseForJson(props) as Record<string, unknown>;
-
   return new TextEncoder().encode(
     JSON.stringify({
       standard:     "arc69",
@@ -174,14 +167,10 @@ export async function buildHarvestTxn(
 ): Promise<algosdk.Transaction> {
   if (!senderAddress) throw new Error("Wallet not connected");
   const sp = await getAlgod().getTransactionParams().do();
-
-  // Explicitly coerce throwAsaId to a plain number so it survives
-  // JSON.stringify even if a BigInt slipped in at the call site.
   const safeProps = {
     ...props,
     throwAsaId: Number(props.throwAsaId),
   };
-
   return algosdk.makePaymentTxnWithSuggestedParamsFromObject({
     sender:          senderAddress,
     receiver:        senderAddress,
@@ -205,7 +194,7 @@ export async function signAndSendTxns(
   const toSign = txns.map((txn) => ({ txn, signers: [senderAddress] }));
   const signed: Uint8Array[] = await pera.signTransaction([toSign]);
 
-  const txIds:  string[]         = [];
+  const txIds:   string[]        = [];
   let   assetId: number | undefined;
 
   for (const s of signed) {
@@ -214,15 +203,12 @@ export async function signAndSendTxns(
 
     const result = await algosdk.waitForConfirmation(algod, txid, 4);
 
-    // algosdk v3 may return BigInt values — serialise safely for logging.
     console.debug(
       "[eden] confirmation result",
       JSON.stringify(sanitiseForJson(result))
     );
 
     const raw = result as Record<string, unknown>;
-
-    // algosdk v3 returns BigInt for asset-index; Number() handles both.
     const id  =
       (raw["assetIndex"]  as bigint | number | undefined) ??
       (raw["asset-index"] as bigint | number | undefined);
@@ -236,13 +222,17 @@ export async function signAndSendTxns(
 const FETCH_BATCH = 5;
 
 async function processAsset(
-  assetIndex: number
+  // Accept number|bigint so callers don't need to pre-coerce
+  assetIndex: number | bigint
 ): Promise<OnChainThrow | null> {
+  // Normalise to plain number immediately — this is the value stored in
+  // asaId and used for all comparisons and localStorage.
+  const asaId = Number(assetIndex);
   try {
     const indexer = getIndexer();
     const txResp  = await indexer
       .searchForTransactions()
-      .assetID(assetIndex)
+      .assetID(asaId)
       .txType("acfg")
       .do();
 
@@ -256,7 +246,8 @@ async function processAsset(
       if (!props || props.eden_type !== "throw") continue;
       const rt = (tx["round-time"] as number) ?? 0;
       return {
-        asaId:         assetIndex,
+        // Always a plain JS number
+        asaId,
         txId:          tx.id as string,
         throwDate:     (props.throwDate     as string) ?? new Date(rt * 1000).toISOString(),
         podTypeId:     (props.podTypeId     as string) ?? "",
@@ -266,12 +257,12 @@ async function processAsset(
         growthModelId: (props.growthModelId as string) ?? "temperate-herb",
         thrownBy:      (props.thrownBy      as string) ?? "",
         confirmedAt:   new Date(rt * 1000).toISOString(),
-        explorerUrl:   explorerAssetUrl(assetIndex),
+        explorerUrl:   explorerAssetUrl(asaId),
       };
     }
     return null;
   } catch (e) {
-    console.warn("[fetchThrows] error on asset", assetIndex, e);
+    console.warn("[fetchThrows] error on asset", asaId, e);
     return null;
   }
 }
@@ -281,14 +272,20 @@ export async function fetchThrowsForAddress(
 ): Promise<OnChainThrow[]> {
   const indexer = getIndexer();
   const resp    = await indexer.searchForAssets().creator(address).do();
-  const assets  = (resp as { assets?: { index: number }[] }).assets ?? [];
+
+  // algosdk v3 returns asset index as bigint — coerce to number here so
+  // the rest of the app only ever sees plain JS numbers for asaId.
+  const assets = (
+    resp as { assets?: { index: number | bigint }[] }
+  ).assets ?? [];
 
   const out: OnChainThrow[] = [];
 
   for (let i = 0; i < assets.length; i += FETCH_BATCH) {
     const batch   = assets.slice(i, i + FETCH_BATCH);
     const results = await Promise.allSettled(
-      batch.map((a) => processAsset(a.index))
+      // Pass Number(a.index) — processAsset also coerces but belt-and-suspenders
+      batch.map((a) => processAsset(Number(a.index)))
     );
     for (const r of results) {
       if (r.status === "fulfilled" && r.value !== null) {
@@ -309,7 +306,6 @@ export async function fetchHarvestsForAddress(
   const out: OnChainHarvest[] = [];
   try {
     const indexer = getIndexer();
-    // Fixed: was incorrectly referencing `txResp` instead of `resp`
     const resp    = await indexer
       .searchForTransactions()
       .address(address)
@@ -326,7 +322,9 @@ export async function fetchHarvestsForAddress(
       if (!props || props.eden_type !== "harvest") continue;
       const rt = (txn["round-time"] as number) ?? 0;
       out.push({
-        txId:          txn.id as string,
+        txId: txn.id as string,
+        // Coerce to plain number — props.throwAsaId may be number or string
+        // depending on how algosdk decoded the note JSON.
         throwAsaId:    Number(props.throwAsaId    ?? 0),
         plantId:       (props.plantId       as string)                        ?? "",
         quantityClass: (props.quantityClass as "small" | "medium" | "large") ?? "small",
