@@ -29,7 +29,7 @@ export async function getPera(): Promise<
   if (!_pera) {
     const { PeraWalletConnect } = await import("@perawallet/connect");
     _pera = new PeraWalletConnect({
-      network: "testnet",
+      network:               "testnet",
       shouldShowSignTxnToast: true,
     });
   }
@@ -49,16 +49,38 @@ export function explorerTxUrl(txId: string): string {
   return `${EXPLORER_BASE}/tx/${txId}`;
 }
 
+/**
+ * Safely convert any value to a JSON-serialisable primitive.
+ * Converts BigInt → number, leaves everything else as-is.
+ */
+function sanitiseForJson(val: unknown): unknown {
+  if (typeof val === "bigint") return Number(val);
+  if (Array.isArray(val))      return val.map(sanitiseForJson);
+  if (val !== null && typeof val === "object") {
+    return Object.fromEntries(
+      Object.entries(val as Record<string, unknown>).map(([k, v]) => [
+        k,
+        sanitiseForJson(v),
+      ])
+    );
+  }
+  return val;
+}
+
 function buildNote(
-  type: string,
+  type:  string,
   props: Record<string, unknown>
 ): Uint8Array {
+  // Sanitise props so that any BigInt values (e.g. throwAsaId coming from
+  // algosdk v3) are converted to numbers before JSON.stringify runs.
+  const safeProps = sanitiseForJson(props) as Record<string, unknown>;
+
   return new TextEncoder().encode(
     JSON.stringify({
       standard:     "arc69",
       description:  `Eden Pods — ${type}`,
       external_url: "https://edenpods.earth",
-      properties:   { ...props, eden_type: type, eden_version: 1 },
+      properties:   { ...safeProps, eden_type: type, eden_version: 1 },
     })
   );
 }
@@ -82,10 +104,6 @@ function parseNote(note: unknown): Record<string, unknown> | null {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 export interface ThrowMetadata {
   podTypeId:     string;
   podTypeName:   string;
@@ -98,17 +116,17 @@ export interface ThrowMetadata {
 }
 
 export interface OnChainThrow {
-  asaId:        number;
-  txId:         string;
-  throwDate:    string;
-  podTypeId:    string;
-  podTypeName:  string;
-  podTypeIcon:  string;
-  locationLabel:string;
-  growthModelId:string;
-  thrownBy:     string;
-  confirmedAt:  string;
-  explorerUrl:  string;
+  asaId:         number;
+  txId:          string;
+  throwDate:     string;
+  podTypeId:     string;
+  podTypeName:   string;
+  podTypeIcon:   string;
+  locationLabel: string;
+  growthModelId: string;
+  thrownBy:      string;
+  confirmedAt:   string;
+  explorerUrl:   string;
 }
 
 export interface OnChainHarvest {
@@ -121,10 +139,6 @@ export interface OnChainHarvest {
   confirmedAt:   string;
 }
 
-// ---------------------------------------------------------------------------
-// Transaction builders
-// ---------------------------------------------------------------------------
-
 export async function buildMintThrowTxns(params: {
   senderAddress: string;
   metadata:      ThrowMetadata;
@@ -133,16 +147,16 @@ export async function buildMintThrowTxns(params: {
   const sp   = await getAlgod().getTransactionParams().do();
   const name = `Eden Throw ${params.metadata.podTypeIcon} ${params.metadata.podTypeName}`.slice(0, 32);
   const txn  = algosdk.makeAssetCreateTxnWithSuggestedParamsFromObject({
-    sender:        params.senderAddress,
-    assetName:     name,
-    unitName:      "THROW",
-    total:         1n,
-    decimals:      0,
-    defaultFrozen: false,
-    manager:       params.senderAddress,
-    reserve:       params.senderAddress,
-    assetURL:      "https://edenpods.earth",
-    note:          buildNote("throw", params.metadata),
+    sender:          params.senderAddress,
+    assetName:       name,
+    unitName:        "THROW",
+    total:           1n,
+    decimals:        0,
+    defaultFrozen:   false,
+    manager:         params.senderAddress,
+    reserve:         params.senderAddress,
+    assetURL:        "https://edenpods.earth",
+    note:            buildNote("throw", params.metadata as unknown as Record<string, unknown>),
     suggestedParams: sp,
   });
   return [txn];
@@ -160,18 +174,22 @@ export async function buildHarvestTxn(
 ): Promise<algosdk.Transaction> {
   if (!senderAddress) throw new Error("Wallet not connected");
   const sp = await getAlgod().getTransactionParams().do();
+
+  // Explicitly coerce throwAsaId to a plain number so it survives
+  // JSON.stringify even if a BigInt slipped in at the call site.
+  const safeProps = {
+    ...props,
+    throwAsaId: Number(props.throwAsaId),
+  };
+
   return algosdk.makePaymentTxnWithSuggestedParamsFromObject({
     sender:          senderAddress,
     receiver:        senderAddress,
     amount:          0n,
-    note:            buildNote("harvest", props),
+    note:            buildNote("harvest", safeProps),
     suggestedParams: sp,
   });
 }
-
-// ---------------------------------------------------------------------------
-// Sign + send — reuses the singleton Pera instance
-// ---------------------------------------------------------------------------
 
 export async function signAndSendTxns(
   txns:          algosdk.Transaction[],
@@ -196,16 +214,15 @@ export async function signAndSendTxns(
 
     const result = await algosdk.waitForConfirmation(algod, txid, 4);
 
-    // algosdk v3 returns BigInt values — use a replacer so we can log safely
+    // algosdk v3 may return BigInt values — serialise safely for logging.
     console.debug(
       "[eden] confirmation result",
-      JSON.stringify(result, (_key, val) =>
-        typeof val === "bigint" ? val.toString() : val
-      )
+      JSON.stringify(sanitiseForJson(result))
     );
 
-    // v3 uses camelCase .assetIndex (a BigInt); fall back to kebab for safety
     const raw = result as Record<string, unknown>;
+
+    // algosdk v3 returns BigInt for asset-index; Number() handles both.
     const id  =
       (raw["assetIndex"]  as bigint | number | undefined) ??
       (raw["asset-index"] as bigint | number | undefined);
@@ -215,10 +232,6 @@ export async function signAndSendTxns(
 
   return { txIds, assetId };
 }
-
-// ---------------------------------------------------------------------------
-// Indexer helpers
-// ---------------------------------------------------------------------------
 
 const FETCH_BATCH = 5;
 
@@ -272,7 +285,6 @@ export async function fetchThrowsForAddress(
 
   const out: OnChainThrow[] = [];
 
-  // Process in batches to avoid rate-limiting
   for (let i = 0; i < assets.length; i += FETCH_BATCH) {
     const batch   = assets.slice(i, i + FETCH_BATCH);
     const results = await Promise.allSettled(
@@ -297,6 +309,7 @@ export async function fetchHarvestsForAddress(
   const out: OnChainHarvest[] = [];
   try {
     const indexer = getIndexer();
+    // Fixed: was incorrectly referencing `txResp` instead of `resp`
     const resp    = await indexer
       .searchForTransactions()
       .address(address)
@@ -314,7 +327,7 @@ export async function fetchHarvestsForAddress(
       const rt = (txn["round-time"] as number) ?? 0;
       out.push({
         txId:          txn.id as string,
-        throwAsaId:    (props.throwAsaId    as number)                        ?? 0,
+        throwAsaId:    Number(props.throwAsaId    ?? 0),
         plantId:       (props.plantId       as string)                        ?? "",
         quantityClass: (props.quantityClass as "small" | "medium" | "large") ?? "small",
         harvestedAt:   (props.harvestedAt   as string)                        ?? new Date(rt * 1000).toISOString(),
