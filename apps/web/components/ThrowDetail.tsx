@@ -31,9 +31,15 @@ export default function ThrowDetail({
   throwData: UnifiedThrow;
 }) {
   const {
-    observations, onChainHarvests, localHarvests,
-    addObservation, addLocalHarvest, refreshThrows,
-    addOptimisticHarvest, confirmHarvest, removeHarvest,
+    observations,
+    onChainHarvests,
+    localHarvests,
+    addObservation,
+    addLocalHarvest,
+    refreshThrows,
+    addOptimisticHarvest,
+    confirmHarvest,
+    removeHarvest,
   } = useApp();
   const { address } = useWallet();
 
@@ -46,7 +52,7 @@ export default function ThrowDetail({
   const [savingH,   setSavingH]   = useState(false);
   const [onChain,   setOnChain]   = useState(true);
 
-  const pt    = POD_TYPES.find((p)    => p.id === throwData.podTypeId);
+  const pt    = POD_TYPES.find((p) => p.id === throwData.podTypeId);
   const model = GROWTH_MODELS.find((m) => m.id === throwData.growthModelId);
   const sd    = model ? getCurrentStage(throwData.throwDate, model) : null;
   const next  = model ? getNextStage(throwData.throwDate, model)    : null;
@@ -79,7 +85,7 @@ export default function ThrowDetail({
     );
   }
 
-  // ── Harvest lists from context (context now owns optimistic state too) ──────
+  // Harvest lists — context owns both confirmed and optimistic rows
   const myOnChain = onChainHarvests.filter(
     (h) => h.throwAsaId === throwData.asaId
   );
@@ -105,7 +111,7 @@ export default function ThrowDetail({
     0
   );
 
-  // ── Handlers ────────────────────────────────────────────────────────────────
+  // Handlers
   const logObs = (stageId: string) => {
     setSavingObs(stageId);
     addObservation({
@@ -125,8 +131,6 @@ export default function ThrowDetail({
 
     try {
       if (onChain && throwData.asaId > 0) {
-        // Build a placeholder and push it into context (persisted to
-        // localStorage immediately via the useEffect in AppContext).
         const placeholderTxId = `pending-${uuid()}`;
         const placeholder: OnChainHarvest = {
           txId:          placeholderTxId,
@@ -139,7 +143,6 @@ export default function ThrowDetail({
         };
         addOptimisticHarvest(placeholder);
 
-        // Close modal right away — row is visible in context already.
         setModal(false);
         setHPlant("");
         setHNotes("");
@@ -154,22 +157,16 @@ export default function ThrowDetail({
           });
           const { txIds } = await signAndSendTxns([txn], address);
 
-          // Swap placeholder txId for the real one in context.
           confirmHarvest(placeholderTxId, txIds[0] ?? placeholderTxId);
 
           toast.success("Harvest recorded on-chain!");
-
-          // Background refresh so the indexer-fetched version eventually
-          // replaces the optimistic one.
           setTimeout(() => refreshThrows(), 4_000);
         } catch (err) {
-          // Roll back: remove the placeholder from context.
           removeHarvest(placeholderTxId);
           setModal(true);
           throw err;
         }
       } else {
-        // ── Local path ───────────────────────────────────────────────────────
         addLocalHarvest({
           throwId:       throwData.asaId > 0 ? String(throwData.asaId) : throwData.localId,
           plantId:       hPlant,
@@ -363,4 +360,300 @@ export default function ThrowDetail({
                         <p className="text-sm text-gray-600">
                           {s.whatToExpect}
                         </p>
-                        {
+                        {cur && (
+                          <div className="mt-3 h-2 bg-gray-100 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-eden-500 rounded-full"
+                              style={{ width: `${sd.progress}%` }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {myObs.length > 0 && (
+            <div className="mt-4">
+              <h3 className="font-semibold text-gray-700 mb-2">
+                Your Observations
+              </h3>
+              <div className="space-y-2">
+                {myObs.slice(0, 5).map((o) => (
+                  <div
+                    key={o.id}
+                    className="flex items-center gap-3 p-3 bg-white rounded-xl border border-gray-100"
+                  >
+                    <span className="text-xl">
+                      {OBS_STAGES.find((s) => s.id === o.stageId)?.icon ?? "🌿"}
+                    </span>
+                    <div>
+                      <p className="text-sm font-medium text-gray-700 capitalize">
+                        {o.stageId}
+                      </p>
+                      <p className="text-xs text-gray-400">
+                        {timeAgo(o.observedAt)}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Harvest */}
+      {tab === "harvest" && (
+        <div className="px-4 mt-4 space-y-4">
+          <div className="card">
+            <p className="text-sm font-semibold text-gray-700 mb-2">
+              Plants in this pod:
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {pt.plants.map((p) => (
+                <span
+                  key={p}
+                  className="bg-eden-100 text-eden-700 px-3 py-1.5 rounded-xl text-sm font-medium capitalize"
+                >
+                  🌿 {p.replace(/-/g, " ")}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {throwData.asaId > 0 && (
+            <div className="flex items-center gap-3 p-3 bg-purple-50 border border-purple-200 rounded-2xl">
+              <span className="text-sm font-medium text-purple-800 flex-1">
+                Record harvest on-chain
+              </span>
+              <button
+                onClick={() => setOnChain((v) => !v)}
+                className={cn(
+                  "w-12 h-6 rounded-full transition-colors relative flex-shrink-0",
+                  onChain ? "bg-purple-600" : "bg-gray-300"
+                )}
+              >
+                <span
+                  className={cn(
+                    "absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform",
+                    onChain ? "translate-x-6" : "translate-x-0.5"
+                  )}
+                />
+              </button>
+            </div>
+          )}
+
+          <button
+            onClick={() => {
+              setHPlant(pt.plants[0] ?? "");
+              setModal(true);
+            }}
+            className="btn-primary w-full"
+          >
+            Log a Harvest{" "}
+            {onChain && throwData.asaId > 0 ? "(on-chain)" : "(local)"}
+          </button>
+
+          {/* On-chain harvest rows */}
+          {myOnChain.map((h) => (
+            <div
+              key={h.txId}
+              className={cn(
+                "flex items-center gap-3 p-3 bg-white rounded-2xl border",
+                h.txId.startsWith("pending-")
+                  ? "border-purple-200 opacity-70"
+                  : "border-purple-100"
+              )}
+            >
+              <span className="text-2xl">{QUANTITY_ICONS[h.quantityClass]}</span>
+              <div className="flex-1">
+                <p className="font-medium text-sm text-gray-800 capitalize">
+                  {h.plantId.replace(/-/g, " ")}
+                </p>
+                <p className="text-xs text-gray-500">
+                  {QUANTITY_LABELS[h.quantityClass]} ·{" "}
+                  {h.txId.startsWith("pending-")
+                    ? "confirming…"
+                    : timeAgo(h.harvestedAt)}
+                </p>
+              </div>
+              <p className="text-xs font-medium text-purple-700">
+                ~{QUANTITY_GRAMS[h.quantityClass]}g
+              </p>
+            </div>
+          ))}
+
+          {/* Local harvest rows */}
+          {myLocal.map((h) => (
+            <div
+              key={h.id}
+              className="flex items-center gap-3 p-3 bg-white rounded-2xl border border-gray-100"
+            >
+              <span className="text-2xl">{QUANTITY_ICONS[h.quantityClass]}</span>
+              <div className="flex-1">
+                <p className="font-medium text-sm text-gray-800 capitalize">
+                  {h.plantId.replace(/-/g, " ")}
+                </p>
+                <p className="text-xs text-gray-500">
+                  {QUANTITY_LABELS[h.quantityClass]} · {timeAgo(h.harvestedAt)}
+                </p>
+              </div>
+              <p className="text-xs font-medium text-eden-700">
+                ~{QUANTITY_GRAMS[h.quantityClass]}g
+              </p>
+            </div>
+          ))}
+
+          {totalG > 0 && (
+            <div className="card-sm bg-eden-50 border-eden-200 text-center">
+              <p className="text-sm font-semibold text-eden-800">
+                Total Harvested
+              </p>
+              <p className="text-2xl font-bold text-eden-700 mt-1">
+                ~{totalG.toLocaleString()}g
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Recipes */}
+      {tab === "recipes" && (
+        <div className="px-4 mt-4 space-y-4">
+          {recipes.length > 0 ? (
+            recipes.map((r) => (
+              <div key={r.id} className="card">
+                <div className="flex items-start gap-3 mb-3">
+                  <span className="text-3xl">{r.icon}</span>
+                  <div>
+                    <h3 className="font-semibold text-gray-900">{r.name}</h3>
+                    <div className="flex items-center gap-2 mt-0.5 text-xs text-gray-500">
+                      <span>{r.time}</span>
+                      <span>·</span>
+                      <span
+                        className={cn(
+                          "px-2 py-0.5 rounded-full font-medium",
+                          r.difficulty === "easy"
+                            ? "bg-green-100 text-green-700"
+                            : "bg-amber-100 text-amber-700"
+                        )}
+                      >
+                        {r.difficulty}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-sm text-gray-600 leading-relaxed mb-3">
+                  {r.instructions}
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {r.nutritionTags.map((tag) => (
+                    <span key={tag} className="tag">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="text-center py-8 text-gray-400">
+              <div className="text-4xl mb-2">👩‍🍳</div>
+              <p className="text-sm">Recipes will appear as plants mature</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Harvest Modal */}
+      {modal && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-end justify-center">
+          <div className="bg-white rounded-t-3xl p-6 w-full max-w-lg max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="text-xl font-bold text-gray-900">Log Harvest</h3>
+              <button
+                onClick={() => setModal(false)}
+                className="text-gray-400 text-2xl"
+              >
+                ×
+              </button>
+            </div>
+            <div className="space-y-5">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  What did you harvest?
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  {pt.plants.map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setHPlant(p)}
+                      className={cn(
+                        "p-3 rounded-2xl border-2 text-left transition-all",
+                        hPlant === p
+                          ? "border-eden-500 bg-eden-50"
+                          : "border-gray-200 hover:border-eden-300"
+                      )}
+                    >
+                      <span className="text-sm font-medium text-gray-800 capitalize">
+                        🌿 {p.replace(/-/g, " ")}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  How much?
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(["small", "medium", "large"] as const).map((q) => (
+                    <button
+                      key={q}
+                      onClick={() => setHQty(q)}
+                      className={cn(
+                        "p-3 rounded-2xl border-2 text-center transition-all",
+                        hQty === q
+                          ? "border-eden-500 bg-eden-50"
+                          : "border-gray-200 hover:border-eden-300"
+                      )}
+                    >
+                      <div className="text-2xl mb-1">{QUANTITY_ICONS[q]}</div>
+                      <span className="text-xs font-medium text-gray-700">
+                        {QUANTITY_LABELS[q]}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <textarea
+                value={hNotes}
+                onChange={(e) => setHNotes(e.target.value)}
+                placeholder="Notes (optional)"
+                rows={2}
+                className="w-full border-2 border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:border-eden-400 resize-none"
+              />
+
+              <button
+                onClick={logHarvest}
+                disabled={savingH || !hPlant}
+                className="btn-primary w-full disabled:opacity-50"
+              >
+                {savingH
+                  ? "Saving..."
+                  : onChain && throwData.asaId > 0
+                  ? "Record On-Chain"
+                  : "Save Locally"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
