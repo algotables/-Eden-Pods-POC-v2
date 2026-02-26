@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body { @apply bg-eden-50 text-gray-900 font-sans; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2
+           bg-eden-600 hover:bg-eden-700 active:scale-95
+           text-white font-semibold text-lg
+           px-8 py-4 rounded-2xl shadow-md
+           transition-all duration-150 min-h-[60px];
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2
+           bg-white hover:bg-eden-50 active:scale-95
+           text-eden-700 font-semibold text-lg
+           px-8 py-4 rounded-2xl border-2 border-eden-200
+           transition-all duration-150 min-h-[60px];
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-1
+           text-eden-600 hover:bg-eden-100
+           font-medium px-3 py-2 rounded-xl
+           transition-all duration-150;
+  }
+  .card    { @apply bg-white rounded-3xl border border-eden-100 shadow-sm p-5; }
+  .card-sm { @apply bg-white rounded-2xl border border-eden-100 shadow-sm p-4; }
+  .tag     { @apply text-xs bg-eden-100 text-eden-700 px-2 py-0.5 rounded-lg font-medium; }
+  .badge-stage {
+    @apply inline-flex items-center gap-1 text-xs font-semibold
+           bg-eden-100 text-eden-800 px-2.5 py-1 rounded-full;
+  }
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-up { animation: fadeUp 0.35s ease-out; }
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-thumb { background: #86efac; border-radius: 99px; }
